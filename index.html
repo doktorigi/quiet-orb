@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quiet Orb</title>
+<link rel="icon" href="data:,">
+<meta name="description" content="A free, open-source breathing meditation for Meta Quest and any browser.">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1030; color: #fff;
+    font: 18px/1.5 system-ui, sans-serif; }
+  canvas { display: block; }
+  [hidden] { display: none !important; }
+  #ui { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 1rem; text-align: center; padding: 16px;
+    background: rgba(8, 10, 30, .55); }
+  h1 { font-weight: 300; font-size: 2.6rem; margin: 0; letter-spacing: .08em; }
+  p { margin: 0; max-width: 32rem; opacity: .85; }
+  button { font: inherit; color: #fff; background: rgba(255, 255, 255, .12);
+    border: 1px solid rgba(255, 255, 255, .5); border-radius: 999px; padding: .8rem 1.8rem; cursor: pointer; }
+  button:hover, button:focus-visible { background: rgba(255, 255, 255, .3); }
+  #lengths { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+  #end { position: fixed; bottom: 16px; right: 16px; }
+  a { color: #ffd9a0; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>Quiet Orb</h1>
+  <p>Breathe with the orb: in as it grows, out as it shrinks. Sit comfortably and pick a length.</p>
+  <div id="lengths">
+    <button data-min="5">5 minutes</button>
+    <button data-min="10">10 minutes</button>
+    <button data-min="20">20 minutes</button>
+  </div>
+  <p><small>In a headset this opens in VR. Free and open source:
+    <a href="https://github.com/doktorigi/quiet-orb">source</a>.</small></p>
+</div>
+<button id="end" hidden>End session</button>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js';
+
+// ponytail: one fixed pace (4s in, 2s hold, 6s out). Add a pace picker if people ask.
+const PHASES = [['Breathe in', 4], ['Hold', 2], ['Breathe out', 6]];
+const CYCLE = PHASES.reduce((s, p) => s + p[1], 0);
+const ease = x => 0.5 - 0.5 * Math.cos(Math.PI * x);
+
+// Seconds since session start -> current phase label and orb size (0 = empty lungs, 1 = full).
+function breath(t) {
+  let u = ((t % CYCLE) + CYCLE) % CYCLE;
+  for (const [label, len] of PHASES) {
+    if (u < len) {
+      const x = u / len;
+      return { label, size: label === 'Breathe in' ? ease(x) : label === 'Hold' ? 1 : 1 - ease(x) };
+    }
+    u -= len;
+  }
+}
+
+if (location.hash === '#test') {
+  const eq = (a, b) => { if (Math.abs(a - b) > 1e-9) throw new Error(`breath check: ${a} != ${b}`); };
+  eq(breath(0).size, 0); eq(breath(2).size, 0.5); eq(breath(5).size, 1);
+  eq(breath(9).size, 0.5); eq(breath(CYCLE).size, 0); eq(breath(CYCLE + 2).size, 0.5);
+  if (breath(4.5).label !== 'Hold' || breath(11.9).label !== 'Breathe out') throw new Error('breath labels');
+  document.title = 'tests ok';
+}
+
+// ---------- scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const HORIZON = new THREE.Color('#6a4a7c'), ZENITH = new THREE.Color('#070a24');
+scene.fog = new THREE.Fog(HORIZON, 5, 70);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+camera.position.set(0, 1.2, 0);
+
+// Dusk sky: vertex-coloured dome, no textures or lights anywhere (cheap enough for Quest 2).
+const skyGeo = new THREE.SphereGeometry(100, 32, 24);
+const skyPos = skyGeo.attributes.position, skyCol = [], c = new THREE.Color();
+for (let i = 0; i < skyPos.count; i++) {
+  c.copy(HORIZON).lerp(ZENITH, Math.sqrt(Math.max(0, skyPos.getY(i) / 100)));
+  skyCol.push(c.r, c.g, c.b);
+}
+skyGeo.setAttribute('color', new THREE.Float32BufferAttribute(skyCol, 3));
+scene.add(new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false })));
+
+const ground = new THREE.Mesh(new THREE.CircleGeometry(100, 48), new THREE.MeshBasicMaterial({ color: '#0a0a18' }));
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+function points(n, place, material) {
+  const pos = [];
+  for (let i = 0; i < n; i++) pos.push(...place());
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  return new THREE.Points(geo, new THREE.PointsMaterial(material));
+}
+const v = new THREE.Vector3();
+scene.add(points(1500, () => {
+  do v.randomDirection(); while (v.y < 0.08);
+  return v.multiplyScalar(90).toArray();
+}, { size: 0.35, color: '#ffffff', fog: false, transparent: true, opacity: 0.8 }));
+
+const fireflies = points(80, () => {
+  const a = Math.random() * Math.PI * 2, r = 2.5 + Math.random() * 6;
+  return [Math.cos(a) * r, 0.3 + Math.random() * 2.7, Math.sin(a) * r];
+}, { size: 0.04, color: '#ffd9a0', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+scene.add(fireflies);
+
+const ORB = new THREE.Vector3(0, 1.2, -2);
+const orb = new THREE.Mesh(new THREE.SphereGeometry(0.25, 48, 32), new THREE.MeshBasicMaterial({ color: '#ffe9c9', fog: false }));
+orb.position.copy(ORB);
+scene.add(orb);
+
+const haloCv = document.createElement('canvas'); haloCv.width = haloCv.height = 128;
+const hg = haloCv.getContext('2d'), grad = hg.createRadialGradient(64, 64, 0, 64, 64, 64);
+grad.addColorStop(0, 'rgba(255,225,180,.7)'); grad.addColorStop(1, 'rgba(255,225,180,0)');
+hg.fillStyle = grad; hg.fillRect(0, 0, 128, 128);
+const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(haloCv),
+  blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+halo.position.copy(ORB);
+scene.add(halo);
+
+const labelCv = document.createElement('canvas'); labelCv.width = 512; labelCv.height = 128;
+const lg = labelCv.getContext('2d'), labelTex = new THREE.CanvasTexture(labelCv);
+const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTex, transparent: true, depthWrite: false, fog: false }));
+label.scale.set(1.2, 0.3, 1);
+label.position.set(0, 0.55, -2);
+scene.add(label);
+let shown;
+function setLabel(s) {
+  if (s === shown) return;
+  shown = s;
+  lg.clearRect(0, 0, 512, 128);
+  lg.font = '300 56px system-ui, sans-serif';
+  lg.fillStyle = 'rgba(255,255,255,.85)';
+  lg.textAlign = 'center'; lg.textBaseline = 'middle';
+  lg.fillText(s, 256, 64);
+  labelTex.needsUpdate = true;
+}
+
+// ---------- sound (all synthesised, no audio files) ----------
+let ctx, drone;
+function startAudio() {
+  ctx ??= new AudioContext();
+  ctx.resume();
+  const now = ctx.currentTime, out = ctx.createGain(), lp = ctx.createBiquadFilter();
+  out.gain.setValueAtTime(0, now);
+  out.gain.linearRampToValueAtTime(0.2, now + 4);
+  lp.frequency.value = 250;
+  lp.connect(out).connect(ctx.destination);
+  const oscs = [110, 110.6, 165, 220.4].map(f => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sawtooth'; o.frequency.value = f; g.gain.value = 0.15;
+    o.connect(g).connect(lp); o.start();
+    return o;
+  });
+  drone = { out, lp, oscs };
+}
+function stopAudio() {
+  if (!drone) return;
+  const { out, oscs } = drone, now = ctx.currentTime;
+  drone = null;
+  out.gain.cancelScheduledValues(now);
+  out.gain.setValueAtTime(out.gain.value, now);
+  out.gain.linearRampToValueAtTime(0, now + 3);
+  oscs.forEach(o => o.stop(now + 3));
+}
+function bell() {
+  const now = ctx.currentTime;
+  for (const [f, vol] of [[528, 0.3], [1056, 0.08], [1584, 0.04]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(vol, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 5);
+    o.connect(g).connect(ctx.destination);
+    o.start(now); o.stop(now + 5);
+  }
+}
+
+// ---------- session ----------
+const ui = document.getElementById('ui'), endBtn = document.getElementById('end');
+let running = false, t0 = 0, duration = 0, xrSession = null, vrOK = false;
+navigator.xr?.isSessionSupported('immersive-vr').then(ok => { vrOK = ok; }).catch(() => {});
+
+async function start(minutes) {
+  startAudio(); bell();
+  duration = minutes * 60; t0 = performance.now(); running = true;
+  ui.hidden = true; endBtn.hidden = false;
+  if (!vrOK) return;
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
+    xrSession.addEventListener('end', () => { xrSession = null; stop(); });
+    await renderer.xr.setSession(xrSession);
+    t0 = performance.now(); // the permission prompt shouldn't eat session time
+  } catch (e) {
+    console.warn('VR unavailable, playing on screen instead', e);
+    xrSession?.end().catch(() => {});
+  }
+}
+function stop() {
+  if (!running) return;
+  running = false;
+  bell(); stopAudio();
+  ui.hidden = false; endBtn.hidden = true;
+  xrSession?.end().catch(() => {});
+}
+document.getElementById('lengths').addEventListener('click', e => {
+  const min = Number(e.target.dataset?.min);
+  if (min) start(min);
+});
+endBtn.addEventListener('click', stop);
+
+addEventListener('resize', () => {
+  if (renderer.xr.isPresenting) return;
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), t = (running ? now - t0 : now) / 1000;
+  const b = breath(t), s = 0.6 + 0.8 * b.size;
+  orb.scale.setScalar(s);
+  halo.scale.setScalar(s * 1.7);
+  setLabel(running ? b.label : '');
+  fireflies.rotation.y = now * 0.00002;
+  // The drone opens up on the in-breath, so the pace can be followed with eyes closed.
+  drone?.lp.frequency.setTargetAtTime(250 + 450 * b.size, ctx.currentTime, 0.1);
+  if (running && t >= duration) stop();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
